@@ -1,0 +1,36 @@
+syntax = "proto3";
+
+option go_package = "ConnectionStats/connstatsprotobuf";
+
+package connstatsprotobuf;
+
+// The greeting service definition.
+service StatsService {
+  // Sends a connection stats
+  rpc CollectStats (StatsRequest) returns (StatsReply) {}
+
+}
+
+message ConnectionStat {
+	string protocol = 1;     
+    string l_ip  = 2;       //netip.Addr
+	string r_ip  = 3;       //netip.Addr
+	uint32 l_port = 4;      
+	uint32 r_port = 5;      
+	uint32 packets_in = 6;  
+	uint32 packets_out = 7;
+	uint64 ts_start = 8;     
+	uint64 ts_current = 9;     
+	uint64 bytes_in = 10;   
+	uint64 bytes_out = 11;  
+  }
+
+// The request message.
+message StatsRequest {
+  
+}
+
+// The response message containing the stats table
+message StatsReply {
+    repeated ConnectionStat connstat = 1;
+}
