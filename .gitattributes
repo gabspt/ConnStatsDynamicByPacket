@@ -1,1 +1,2 @@
 cmd/TESTS_Packet_Aggregation/flows_stats1_2.csv filter=lfs diff=lfs merge=lfs -text
+*.csv filter=lfs diff=lfs merge=lfs -text
