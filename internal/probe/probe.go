@@ -2,22 +2,24 @@ package probe
 
 import (
 	"context"
-	"encoding/binary"
+	//"sync"
+
+	//"encoding/binary"
+	"encoding/csv"
 	"fmt"
 	"log"
 	"net"
 	"os"
-	"time"
+	"strconv"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/gabspt/ConnectionStats/clsact"
-	"github.com/gabspt/ConnectionStats/internal/timer"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go probe ../../bpf/connstats_dynamic_packets.c - -O3  -Wall -Werror -Wno-address-of-packed-member
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go probe ../../bpf/connstats_dynamic_packets_tcpreplay_3.c - -O3  -Wall -Werror -Wno-address-of-packed-member
 
 const tenMegaBytes = 1024 * 1024 * 10      // 10MB
 const twentyMegaBytes = tenMegaBytes * 2   // 20MB
@@ -27,7 +29,7 @@ const TCP_IDLE_TIME = 300000000000 //300000ms = 5min
 const UDP_IDLE_TIME = 200000000000 //200000ms = 3min and 20s
 const SINGLETON_TIME = 10000000000 //10000ms = 10s
 
-var lastCall time.Time
+const scaleFactor = 1000
 
 var ipProtoNums = map[uint8]string{
 	6:  "TCP",
@@ -42,22 +44,21 @@ type probe struct {
 	filters    []*netlink.BpfFilter
 }
 
-type Flowrecord struct {
-	fid uint64
-	fm  probeFlowMetrics
+type EvictSubmittion struct {
+	evict bool
 }
 
 func setRlimit() error {
-	log.Printf("Setting rlimit - soft: %v, hard: %v", twentyMegaBytes, fortyMegaBytes)
+	//log.Printf("Setting rlimit - soft: %v, hard: %v", twentyMegaBytes, fortyMegaBytes)
 
 	return unix.Setrlimit(unix.RLIMIT_MEMLOCK, &unix.Rlimit{
 		Cur: tenMegaBytes,
-		Max: twentyMegaBytes,
+		Max: fortyMegaBytes,
 	})
 }
 
 func (p *probe) loadObjects(pktAgrupation int) error {
-	log.Printf("Loading probe object to kernel")
+	//log.Printf("Loading probe object to kernel")
 
 	objs := probeObjects{}
 
@@ -67,7 +68,7 @@ func (p *probe) loadObjects(pktAgrupation int) error {
 
 	keyp := uint32(0)
 	valuep := uint32(pktAgrupation)
-	err := objs.Userconfig.Update(&keyp, &valuep, ebpf.UpdateAny)
+	err := objs.probeMaps.Userconfig.Update(&keyp, &valuep, ebpf.UpdateAny)
 	if err != nil {
 		return err
 	}
@@ -78,7 +79,7 @@ func (p *probe) loadObjects(pktAgrupation int) error {
 }
 
 func (p *probe) createQdisc() error {
-	log.Printf("Creating qdisc")
+	//log.Printf("Creating qdisc")
 
 	p.qdisc = clsact.NewClsAct(&netlink.QdiscAttrs{
 		LinkIndex: p.iface.Attrs().Index,
@@ -96,7 +97,7 @@ func (p *probe) createQdisc() error {
 }
 
 func (p *probe) createFilters() error {
-	log.Printf("Creating qdisc filters")
+	//log.Printf("Creating qdisc filters")
 
 	addFilterin := func(attrs netlink.FilterAttrs) {
 		p.filters = append(p.filters, &netlink.BpfFilter{
@@ -105,13 +106,6 @@ func (p *probe) createFilters() error {
 			DirectAction: true,
 		})
 	}
-	// addFilterout := func(attrs netlink.FilterAttrs) {
-	// 	p.filters = append(p.filters, &netlink.BpfFilter{
-	// 		FilterAttrs:  attrs,
-	// 		Fd:           p.bpfObjects.probePrograms.Connstatsout.FD(),
-	// 		DirectAction: true,
-	// 	})
-	// }
 
 	addFilterin(netlink.FilterAttrs{
 		LinkIndex: p.iface.Attrs().Index,
@@ -120,26 +114,12 @@ func (p *probe) createFilters() error {
 		Protocol:  unix.ETH_P_IP,
 	})
 
-	// addFilterout(netlink.FilterAttrs{
-	// 	LinkIndex: p.iface.Attrs().Index,
-	// 	Handle:    netlink.MakeHandle(0xffff, 0),
-	// 	Parent:    netlink.HANDLE_MIN_EGRESS,
-	// 	Protocol:  unix.ETH_P_IP,
-	// })
-
 	addFilterin(netlink.FilterAttrs{
 		LinkIndex: p.iface.Attrs().Index,
 		Handle:    netlink.MakeHandle(0xffff, 0),
 		Parent:    netlink.HANDLE_MIN_INGRESS,
 		Protocol:  unix.ETH_P_IPV6,
 	})
-
-	// addFilterout(netlink.FilterAttrs{
-	// 	LinkIndex: p.iface.Attrs().Index,
-	// 	Handle:    netlink.MakeHandle(0xffff, 0),
-	// 	Parent:    netlink.HANDLE_MIN_EGRESS,
-	// 	Protocol:  unix.ETH_P_IPV6,
-	// })
 
 	for _, filter := range p.filters {
 		if err := p.handle.FilterAdd(filter); err != nil {
@@ -153,7 +133,7 @@ func (p *probe) createFilters() error {
 }
 
 func newProbe(iface netlink.Link, pktAgrupation int) (*probe, error) {
-	log.Println("Creating a new probe")
+	//log.Println("Creating a new probe")
 
 	if err := setRlimit(); err != nil {
 		log.Printf("Failed setting rlimit: %v", err)
@@ -204,43 +184,72 @@ func (p *probe) PrintGlobalMetrics() {
 	log.Printf("Global metrics:")
 	log.Printf("---------------")
 	log.Printf("Total packets processed: %v", gm.TotalProcessedpackets)
-	log.Printf("Total packets analyzed (TCP+UDP): %v", gm.TotalTcpudppackets)
+	log.Printf("Total packets analyzed (TCP+UDP): %v", gm.TotalTcppackets+gm.TotalUdppackets)
 	log.Printf("Total TCP packets analyzed: %v", gm.TotalTcppackets)
 	log.Printf("Total UDP packets analyzed: %v", gm.TotalUdppackets)
-	log.Printf("Total flows analyzed: %v", gm.TotalFlows)
+	//log.Printf("Total flows analyzed: %v", gm.TotalFlows)
 	log.Printf("Total TCP flows analyzed: %v", gm.TotalTcpflows)
 	log.Printf("Total UDP flows analyzed: %v", gm.TotalUdpflows)
 	log.Printf("")
 }
 
-func writeFlowStatsToFile(filename string, flowMetrics probeFlowMetrics) {
-	// Open the log file
-	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		log.Println(err)
-	}
-	defer f.Close()
-
-	// Write the flow stats to the log file
-	protoc, ok := ipProtoNums[flowMetrics.FlowTuple.Protocol]
+func writeFlowStatsToCSV(w *csv.Writer, flowStats probeFlowStats) error {
+	//func writeFlowStatsToCSV(w *csv.Writer, flowStats probeFlowMetrics) error {
+	// Write the flow stats to the CSV file
+	protoc, ok := ipProtoNums[flowStats.FlowTuple.Protocol]
 	if !ok {
-		log.Print("Failed fetching protocol number: ", flowMetrics.FlowTuple.Protocol)
+		log.Print("Failed fetching protocol number: ", flowStats.FlowTuple.Protocol)
 	}
-	_, err = f.WriteString(fmt.Sprintf("%v %v:%v %v:%v %v %v %v %v %v %v %v\n",
-		protoc, net.IP(flowMetrics.FlowTuple.A_ip.In6U.U6Addr8[:]).String(), flowMetrics.FlowTuple.A_port, net.IP(flowMetrics.FlowTuple.B_ip.In6U.U6Addr8[:]).String(), flowMetrics.FlowTuple.B_port, flowMetrics.PacketsOut, flowMetrics.BytesOut, flowMetrics.PacketsIn, flowMetrics.BytesIn, flowMetrics.TsStart, flowMetrics.TsCurrent, float64(flowMetrics.TsCurrent-flowMetrics.TsStart)/1000000))
+	ipAndPortA := fmt.Sprintf("%s:%d", net.IP(flowStats.FlowTuple.A_ip.In6U.U6Addr8[:]).String(), flowStats.FlowTuple.A_port)
+	ipAndPortB := fmt.Sprintf("%s:%d", net.IP(flowStats.FlowTuple.B_ip.In6U.U6Addr8[:]).String(), flowStats.FlowTuple.B_port)
+
+	record := []string{
+		protoc,
+		ipAndPortA,
+		ipAndPortB,
+		// strconv.Itoa(int(flowStats.PacketsIn)),
+		// strconv.Itoa(int(flowStats.PacketsOut)),
+		// strconv.Itoa(int(flowStats.BytesIn)),
+		// strconv.Itoa(int(flowStats.BytesOut)),
+		// strconv.FormatFloat(float64(flowStats.TsCurrent-flowStats.TsStart), 'f', 3, 64),
+		strconv.FormatFloat(float64(flowStats.Inpps)/scaleFactor, 'f', 3, 64),
+		strconv.FormatFloat(float64(flowStats.Outpps)/scaleFactor, 'f', 3, 64),
+		strconv.FormatFloat(float64(flowStats.Inbpp)/scaleFactor, 'f', 3, 64),
+		strconv.FormatFloat(float64(flowStats.Outbpp)/scaleFactor, 'f', 3, 64),
+		strconv.FormatFloat(float64(flowStats.Inboutb)/scaleFactor, 'f', 3, 64),
+		strconv.FormatFloat(float64(flowStats.Inpoutp)/scaleFactor, 'f', 3, 64),
+	}
+
+	err := w.Write(record)
 	if err != nil {
-		log.Println(err)
+		return err
 	}
+
+	return nil
 }
 
-func GenerateStats(ft *FlowTable) {
+func writeBlankLineToFile(w *csv.Writer) error {
+	// Write a blank line to the log file
+	err := w.Write([]string{"", "", "", "", "", "", "", ""})
+	if err != nil {
+		log.Printf("Failed to write to CSV: %v", err)
+	}
+	return err
+}
+
+func GenerateStats(ft *FlowTable, w *csv.Writer) {
 	ft.Range(func(key, value interface{}) bool {
-		//flowId := key.(uint64)
-		flowMetrics := value.(probeFlowMetrics)
-		filename := "flows_stats.txt"
-		writeFlowStatsToFile(filename, flowMetrics)
+		flowStats := value.(probeFlowStats)
+		//flowStats := value.(probeFlowMetrics)
+		if err := writeFlowStatsToCSV(w, flowStats); err != nil {
+			log.Println(err)
+		}
 		return true
 	})
+	if err := writeBlankLineToFile(w); err != nil {
+		log.Println(err)
+	}
+	w.Flush()
 }
 
 func (p *probe) Close() error {
@@ -265,105 +274,39 @@ func (p *probe) Close() error {
 	return nil
 }
 
-func UnmarshalFlowRecord(in []byte) (Flowrecord, bool) {
-	f_id := binary.LittleEndian.Uint64(in[0:8])
-	//gather bits from []byte to form L_ip of type struct{ In6U struct{ U6Addr8 [16]uint8 } }
-	var a_ip struct{ In6U struct{ U6Addr8 [16]uint8 } }
-	for i := 0; i < 16; i++ {
-		a_ip.In6U.U6Addr8[i] = in[i+8]
-	}
-	//gather bits from []byte to form R_ip of type struct{ In6U struct{ U6Addr8 [16]uint8 } }
-	var b_ip struct{ In6U struct{ U6Addr8 [16]uint8 } }
-	for i := 0; i < 16; i++ {
-		b_ip.In6U.U6Addr8[i] = in[i+24]
-	}
-
-	// form the probeFlowMetrics struct
-	f_m := probeFlowMetrics{
-		FlowTuple: struct {
-			A_ip     struct{ In6U struct{ U6Addr8 [16]uint8 } }
-			B_ip     struct{ In6U struct{ U6Addr8 [16]uint8 } }
-			A_port   uint16
-			B_port   uint16
-			Protocol uint8
-			_        [3]byte
-		}{
-			A_ip:     a_ip,
-			B_ip:     b_ip,
-			A_port:   binary.LittleEndian.Uint16(in[40:42]),
-			B_port:   binary.LittleEndian.Uint16(in[42:44]),
-			Protocol: in[44],
-		},
-		PacketsIn:    binary.LittleEndian.Uint32(in[48:52]),
-		PacketsOut:   binary.LittleEndian.Uint32(in[52:56]),
-		BytesIn:      binary.LittleEndian.Uint64(in[56:64]),
-		PayloadIn:    binary.LittleEndian.Uint64(in[64:72]),
-		BytesOut:     binary.LittleEndian.Uint64(in[72:80]),
-		PayloadOut:   binary.LittleEndian.Uint64(in[80:88]),
-		TsStart:      binary.LittleEndian.Uint64(in[88:96]),
-		TsCurrent:    binary.LittleEndian.Uint64(in[96:104]),
-		FinCounter:   in[104],
-		FlowClosed:   in[105],
-		SynOrUdpToRb: in[106] == 1,
-		Evict:        in[107] == 1,
-	}
-
-	return Flowrecord{
-		fid: f_id,
-		fm:  f_m,
+func UnmarshalEvictSubmittion(in []byte) (EvictSubmittion, bool) {
+	return EvictSubmittion{
+		evict: in[0] == 1,
 	}, true
 }
 
-func CheckIfStaleEntry(flowmetrics probeFlowMetrics, lastDuration time.Duration) bool {
-	var stale bool
-	lastts := flowmetrics.TsCurrent
-	now := timer.GetNanosecSinceBoot()
-	time_flow := now - lastts
-	lastDurationInNanoseconds := uint64(lastDuration.Nanoseconds())
-	if (flowmetrics.PacketsIn + flowmetrics.PacketsOut) >= 2 {
-		if (flowmetrics.FlowTuple.Protocol == 6) && (time_flow > (TCP_IDLE_TIME - lastDurationInNanoseconds)) {
-			stale = true
-		} else if (flowmetrics.FlowTuple.Protocol == 17) && (time_flow > (UDP_IDLE_TIME - lastDurationInNanoseconds)) {
-			stale = true
-		}
-	} else if time_flow > (SINGLETON_TIME - lastDurationInNanoseconds) {
-		stale = true
-	}
-	return stale
-}
+// func EvictMapEntries(flowsmap *ebpf.Map, w *csv.Writer, mu *sync.Mutex) {
+func EvictMapEntries(flowsmap *ebpf.Map, w *csv.Writer) {
+	//mu.Lock()
+	//defer mu.Unlock()
 
-// func EvictMapEntries evicts map entries from the flowstracker map that have been new added or changed and copy to the flowtable
-func EvictMapEntries(flowstrackermap *ebpf.Map, ft *FlowTable, lastDuration time.Duration) {
-	iterator := flowstrackermap.Iterate()
+	var newft = NewFlowTable()
+	iterator := flowsmap.Iterate()
 	var flowhash uint64
-	var flowmetrics probeFlowMetrics
-	keysToDelete := []uint64{} // Create a slice to hold the keys to delete
-	//iterate over the hash map flowstrackermap
-	for iterator.Next(&flowhash, &flowmetrics) {
-		ft.Store(flowhash, flowmetrics)
-		//luego de updatear el flowtable con los flows del hashmap, hago el prune
-		if CheckIfStaleEntry(flowmetrics, lastDuration) {
-			keysToDelete = append(keysToDelete, flowhash)
-		}
+	var flowstats probeFlowStats
+	//var flowstats probeFlowMetrics
+	for iterator.Next(&flowhash, &flowstats) {
+		newft.Store(flowhash, flowstats)
 	}
-	flowstrackermap.BatchDelete(keysToDelete, nil)
-	for _, key := range keysToDelete {
-		ft.Remove(key) //Delete also from the flowtable o hacer un metodo remove batch
-	}
+	GenerateStats(newft, w)
 }
 
 // Run starts the probe
-func Run(ctx context.Context, iface netlink.Link, ft *FlowTable, pktAgrupation int) error {
-	log.Printf("Starting up the probe at interface %v", iface.Attrs().Name)
-
-	var eviction_counter int
+func Run(ctx context.Context, iface netlink.Link, pktAgrupation int) error {
+	//log.Printf("Starting up the probe at interface %v", iface.Attrs().Name)
 
 	probe, err := newProbe(iface, pktAgrupation)
 	if err != nil {
 		return err
 	}
 
-	flowstrackermap := probe.bpfObjects.probeMaps.Flowstracker
+	flowsmap := probe.bpfObjects.probeMaps.Flowstats
+	//flowsmap := probe.bpfObjects.probeMaps.Flowstracker
 
 	// Create a ring buffer reader
 	pipe := probe.bpfObjects.probeMaps.Pipe
@@ -373,6 +316,18 @@ func Run(ctx context.Context, iface netlink.Link, ft *FlowTable, pktAgrupation i
 		return err
 	}
 
+	//Open the log file and create a new csv writer writing to the opened file
+	filename := "flows_stats1000_2.csv"
+	f, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Println(err)
+	}
+	defer f.Close()
+
+	w := csv.NewWriter(f)
+
+	//var mu sync.Mutex
+
 	go func() {
 		for {
 			event, err := ringreader.Read()
@@ -380,49 +335,29 @@ func Run(ctx context.Context, iface netlink.Link, ft *FlowTable, pktAgrupation i
 				log.Printf("Failed reading ringbuf event: %v", err)
 				return
 			}
-			//log.Printf("Pkt received from ringbuf: %+v", event.RawSample)
-			flowrecord, ok := UnmarshalFlowRecord(event.RawSample)
+
+			//unmarshal evict submittion
+			evictsubmittion, ok := UnmarshalEvictSubmittion(event.RawSample)
 			if !ok {
-				log.Printf("Could not unmarshall flow record: %+v", event.RawSample)
+				log.Printf("Could not unmarshall evict submittion: %+v", event.RawSample)
 				continue
 			}
-			//log.Printf("Flowrecord unmarshalled: %+v", flowrecord)
 
-			// if flow record fin, delete from flow table
-			if flowrecord.fm.FlowClosed == 1 || flowrecord.fm.FlowClosed == 2 {
-				ft.Remove(flowrecord.fid)
+			// if evict submittion is true, erase flows to delete from ft, evict the flowhashes from the flowstracker map and generate stats
+			if evictsubmittion.evict {
+				log.Printf("Eviction")
+				//go EvictMapEntries(flowsmap, w, &mu)
+				EvictMapEntries(flowsmap, w)
+				//log.Printf("Eviction at %v packets, ft size %v", evictsubmittion.packet_counter, ft.Size()) //counts the number of evictions
+				//EvictMapEntries(flowstrackermap, w)
+				//GenerateStats(ft)
 			}
-			if flowrecord.fm.Evict {
-				eviction_counter += 1
-				log.Printf("Eviction %v", eviction_counter) //counts the number of evictions
-				now := time.Now()
-				lastDuration := now.Sub(lastCall)
-				EvictMapEntries(flowstrackermap, ft, lastDuration)
-				lastCall = now
-				GenerateStats(ft)
-			}
-			// if flowrecord.fm.FlowClosed == 1 {
-			// 	writeFlowStatsToFile("flow_tcp_complete_normally_stats.log", flowrecord.fm)
-			// 	ft.Remove(flowrecord.fid)
-			// } else if flowrecord.fm.FlowClosed == 2 {
-			// 	writeFlowStatsToFile("flow_tcp_complete_anormally_stats.log", flowrecord.fm)
-			// 	ft.Remove(flowrecord.fid)
-			// } else if flowrecord.fm.SynOrUdpToRb {
-			// 	//it's a syn tcp or a udp packet that didn't fit in the hashmap -> add it to the flowtable
-			// 	ft.UpdateFlowTableIfSynOrUdpToRb(flowrecord.fid, flowrecord.fm)
-			// 	//ft.UpdateFlowTableIfSynOrUdpToRb(flowrecord.fid, flowrecord.fm)
-			// } else {
-			// 	//it's a tcp no syn packet, add it only if it already exists in the flowtable
-			// 	ft.UpdateFlowTableIfExists(flowrecord.fid, flowrecord.fm)
-			// }
 		}
 	}()
 
 	// Wait for the context to be done
 	for {
-
 		<-ctx.Done()
-		//LogFlowTable(ft) //por si queda alguno en la flowtable que no se haya eliminado con el prune y por tanto copiado al logfile
 		return probe.Close()
 	}
 }

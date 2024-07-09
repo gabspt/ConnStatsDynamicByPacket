@@ -1,0 +1,36 @@
+2024/07/04 23:19:39 Starting up the probe at interface enp0s8
+2024/07/04 23:19:39 Creating a new probe
+2024/07/04 23:19:39 Setting rlimit - soft: 20971520, hard: 41943040
+2024/07/04 23:19:39 Loading probe object to kernel
+2024/07/04 23:19:40 Creating qdisc
+2024/07/04 23:19:40 Creating qdisc filters
+2024/07/04 23:19:46 Eviction
+2024/07/04 23:19:46 Eviction
+2024/07/04 23:19:46 Eviction
+2024/07/04 23:19:46 Eviction
+2024/07/04 23:19:46 Eviction
+2024/07/04 23:19:47 Eviction
+2024/07/04 23:19:47 Eviction
+2024/07/04 23:19:47 Eviction
+2024/07/04 23:19:47 Eviction
+2024/07/04 23:19:47 Eviction
+2024/07/04 23:19:48 Eviction
+2024/07/04 23:19:53 
+Caught SIGINT... Exiting
+2024/07/04 23:19:53 
+2024/07/04 23:19:53 Global metrics:
+2024/07/04 23:19:53 ---------------
+2024/07/04 23:19:53 Total packets processed: 11624
+2024/07/04 23:19:53 Total packets analyzed (TCP+UDP): 11590
+2024/07/04 23:19:53 Total TCP packets analyzed: 10572
+2024/07/04 23:19:53 Total UDP packets analyzed: 501
+2024/07/04 23:19:53 Total flows analyzed: 538
+2024/07/04 23:19:53 Total TCP flows analyzed: 391
+2024/07/04 23:19:53 Total UDP flows analyzed: 147
+2024/07/04 23:19:53 
+2024/07/04 23:19:53 Removing qdisc
+2024/07/04 23:19:53 Deleting handle
+2024/07/04 23:19:53 Closing eBPF object
+Command exited with non-zero status 1
+0.55user 2.61system 0:14.70elapsed 21%CPU (0avgtext+0avgdata 91776maxresident)k
+0inputs+8816outputs (30major+32288minor)pagefaults 0swaps

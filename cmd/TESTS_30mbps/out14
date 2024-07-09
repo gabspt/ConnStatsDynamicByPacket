@@ -1,0 +1,30 @@
+2024/07/07 13:59:13 Eviction
+2024/07/07 13:59:13 Eviction
+2024/07/07 13:59:13 Eviction
+2024/07/07 13:59:14 Eviction
+2024/07/07 13:59:14 Eviction
+2024/07/07 13:59:14 Eviction
+2024/07/07 13:59:14 Eviction
+2024/07/07 13:59:14 Eviction
+2024/07/07 13:59:15 Eviction
+2024/07/07 13:59:15 Eviction
+2024/07/07 13:59:15 Eviction
+2024/07/07 13:59:15 Eviction
+2024/07/07 13:59:16 
+Caught SIGINT... Exiting
+2024/07/07 13:59:16 
+2024/07/07 13:59:16 Global metrics:
+2024/07/07 13:59:16 ---------------
+2024/07/07 13:59:16 Total packets processed: 12522
+2024/07/07 13:59:16 Total packets analyzed (TCP+UDP): 12488
+2024/07/07 13:59:16 Total TCP packets analyzed: 11987
+2024/07/07 13:59:16 Total UDP packets analyzed: 501
+2024/07/07 13:59:16 Total TCP flows analyzed: 391
+2024/07/07 13:59:16 Total UDP flows analyzed: 147
+2024/07/07 13:59:16 
+2024/07/07 13:59:16 Removing qdisc
+2024/07/07 13:59:16 Deleting handle
+2024/07/07 13:59:16 Closing eBPF object
+Command exited with non-zero status 1
+0.51user 1.96system 0:05.31elapsed 46%CPU (0avgtext+0avgdata 91904maxresident)k
+0inputs+8808outputs (33major+32324minor)pagefaults 0swaps

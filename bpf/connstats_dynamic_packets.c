@@ -18,6 +18,7 @@
 #include <stddef.h>
 #include <string.h>
 
+//FastHash
 static __u64 fasthash_mix(__u64 h) {
 	h ^= h >> 23;
 	h *= 0x2127599bf4325c37ULL;
@@ -58,6 +59,7 @@ __u64 fasthash64(const void *buf, __u64 len, __u64 seed)
 	return fasthash_mix(h);
 }
 
+// Flow metering
 struct packet_t {
     struct in6_addr src_ip;
     struct in6_addr dst_ip;
@@ -71,7 +73,7 @@ struct packet_t {
     uint64_t ts;
     //bool outbound;
     __u32 len;
-    __u32 payload_size;
+    //__u32 payload_size;
 };
 struct flow_tuple {
     struct in6_addr a_ip;
@@ -85,14 +87,15 @@ struct flow_metrics {
     __u32 packets_in;
     __u32 packets_out;
     __u64 bytes_in;
-    __u64 payload_in;
+    //__u64 payload_in;
     __u64 bytes_out;
-    __u64 payload_out;
+    //__u64 payload_out;
     __u64 ts_start;
     __u64 ts_current;
     __u8 fin_counter;
+    __u8 ack_counter;
     __u8 flow_closed; // 0 flow open, 1 flow ended normally, 2 flow ended anormally
-    bool syn_or_udp_to_rb;
+    //bool syn_or_udp_to_rb;
     bool evict;
 };
 
@@ -133,7 +136,7 @@ struct {
 //     __type(key, __u64);
 //     __type(value, struct flow_metrics);
 //     __uint(map_flags, BPF_F_NO_PREALLOC);
-// } flowstracker SEC(".maps");
+// } flowstrackerpercpu SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -229,7 +232,7 @@ static inline int handle_ip_segment(uint8_t* head, uint8_t* tail, uint32_t* offs
     switch (pkt->protocol) {
     case IPPROTO_TCP:
         tcp = (void*)head + *offset;
-        *offset += tcp->doff * 4; // Actualizar el offset con el tamaño de la cabecera TCP
+        //*offset += tcp->doff * 4; // Actualizar el offset con el tamaño de la cabecera TCP para luego calcular el payload
 
         pkt->src_port = tcp->source;
         pkt->dst_port = tcp->dest;
@@ -243,7 +246,7 @@ static inline int handle_ip_segment(uint8_t* head, uint8_t* tail, uint32_t* offs
 
     case IPPROTO_UDP:
         udp = (void*)head + *offset;
-        *offset += sizeof(struct udphdr); // Actualizar el offset con el tamaño de la cabecera UDP
+        //*offset += sizeof(struct udphdr); // Actualizar el offset con el tamaño de la cabecera UDP para luego calcular el payload
 
         pkt->src_port = udp->source;
         pkt->dst_port = udp->dest;
@@ -303,7 +306,7 @@ static inline int submit_flow_record(__u64 flowhash, struct flow_metrics *flowme
     return 0;
 }
 
-static inline int update_metrics(struct packet_t* pkt, struct global_metrics *globalm) {
+static inline int update_metrics(struct packet_t *pkt, struct global_metrics *globalm) {
     //initialze packet aggregation level value
     static __u32 pkt_aggregation_value = 0;
     static bool initialized = false;
@@ -334,8 +337,8 @@ static inline int update_metrics(struct packet_t* pkt, struct global_metrics *gl
     flowtuple.b_port = bpf_ntohs(pkt->dst_port);
     flowtuple.protocol = pkt->protocol;
    
-    __u64 flowhash = 0;
-    flowhash = calculate_flow_id_hash(&flowtuple);
+    //static __u64 flowhash = 0;
+    __u64 flowhash = calculate_flow_id_hash(&flowtuple);
 
     struct flow_metrics *flowmetrics = bpf_map_lookup_elem(&flowstracker, &flowhash);
     if (flowmetrics != NULL) {
@@ -344,24 +347,28 @@ static inline int update_metrics(struct packet_t* pkt, struct global_metrics *gl
         if (are_equal(pkt->src_ip, flowmetrics->flow_tuple.a_ip)) { 
             flowmetrics->packets_out += 1;
             flowmetrics->bytes_out += pkt->len;
-            flowmetrics->payload_out += pkt->payload_size;
+            //flowmetrics->payload_out += pkt->payload_size;
         } else { //update ingress metrics
             flowmetrics->packets_in += 1;
             flowmetrics->bytes_in += pkt->len;
-            flowmetrics->payload_in += pkt->payload_size;
+            //flowmetrics->payload_in += pkt->payload_size;
         }
         if (pkt->fin == true && pkt->ack == true) { // FIN/ACK segment observed
             flowmetrics->fin_counter += 1;
         }
+        if (flowmetrics->fin_counter>=1 && pkt->ack == true && pkt->fin == false && pkt->syn == false && pkt->rst == false) { //flow ended normally  
+            flowmetrics->ack_counter += 1;
+        }
+
         if (globalm->total_tcpudppackets % pkt_aggregation_value == 0) {
             flowmetrics->evict = true;
         }else{
             flowmetrics->evict = false;
         }
 
-        //check if flow ended //consider flow ended, send to userspace to be deleted from hash map and flowtable
-        //after 2 fin packets and 1 ack are received consider flow ended normally, or if rst packet recieved consider flow ended anormally, -> delete flow from map
-        if (flowmetrics->fin_counter>=2 && pkt->ack == true && pkt->fin == false && pkt->syn == false && pkt->rst == false) { //flow ended normally  
+        //check if flow ended, send to userspace to be deleted from hash map and flowtable
+        //after 2 fin packets and 2 ack are received consider flow ended normally, or if rst packet recieved consider flow ended anormally, -> delete flow from map
+        if (flowmetrics->fin_counter>=2 && flowmetrics->ack_counter>=2 && pkt->ack == true && pkt->fin == false && pkt->syn == false && pkt->rst == false) { //flow ended normally  
             flowmetrics->flow_closed = 1;
         } else if (pkt->rst == true) { //flow ended anormally
             flowmetrics->flow_closed = 2;
@@ -371,13 +378,13 @@ static inline int update_metrics(struct packet_t* pkt, struct global_metrics *gl
                 //bpf_printk("error updating flow %d\n", ret);
                 return TC_ACT_OK;
             }
-            //return TC_ACT_OK;
+            return TC_ACT_OK;
         }
 
         if (flowmetrics->flow_closed == 1 || flowmetrics->flow_closed == 2) {
             // flow ended, delete from hash map
             bpf_map_delete_elem(&flowstracker, &flowhash);
-            //send to userspace to be deleted from flowtable and saved to log
+            //send to userspace to be deleted from flowtable and saved to log //quisiera evitar mandar aqui y solo mandar cuando sellegue a los 100
             if (submit_flow_record(flowhash, flowmetrics) == TC_ACT_OK) {
                 return TC_ACT_OK;
             }
@@ -392,7 +399,7 @@ static inline int update_metrics(struct packet_t* pkt, struct global_metrics *gl
         new_flowm.ts_current = pkt->ts;
         new_flowm.packets_out = 1;
         new_flowm.bytes_out = pkt->len;
-        new_flowm.payload_out = pkt->payload_size;
+        //new_flowm.payload_out = pkt->payload_size;
         if (globalm->total_tcpudppackets % pkt_aggregation_value == 0) {
             new_flowm.evict = true;
         }else{
@@ -410,36 +417,37 @@ static inline int update_metrics(struct packet_t* pkt, struct global_metrics *gl
             }
             bpf_map_update_elem(&globalmetrics, &keygb, globalm, BPF_ANY); 
 
-            //add to flowstracker hash map
+            //add flow to flowstracker hash map
             long ret = bpf_map_update_elem(&flowstracker, &flowhash, &new_flowm, BPF_NOEXIST);
             if (ret != 0) {
-                //bpf_printk("error adding new flow %d\n", ret); //maybe because map is full -> send to userspace via ringbuf to avoid losing flows
-                new_flowm.syn_or_udp_to_rb = true;
-                if (submit_flow_record(flowhash, &new_flowm) == TC_ACT_OK) {
-                    return TC_ACT_OK;
-                }   
-                //if tcp set syndidntfitsentrb to true
-                if (pkt->protocol == IPPROTO_TCP) {
-                    syndidntfitsentrb = true; // didnt fit, sent to userspace via ringbuf successfully        
-                }  
+                //bpf_printk("error adding new flow %d\n", ret); 
+                //maybe because map is full->send to userspace via ringbuf to avoid losing flows // ESTOS CASOS se contemplaran a futuro, de momento se asume que se actualizan bien
+                // new_flowm.syn_or_udp_to_rb = true;
+                // if (submit_flow_record(flowhash, &new_flowm) == TC_ACT_OK) {
+                //     return TC_ACT_OK;
+                // }   
+                // //if tcp set syndidntfitsentrb to true
+                // if (pkt->protocol == IPPROTO_TCP) {
+                //     syndidntfitsentrb = true; // didnt fit, sent to userspace via ringbuf successfully        
+                // }  
                 return TC_ACT_OK;  
             }
             //syndidntfitsentrb = false;
-        } else{          
-            //es un tcp no syn que no existe en el hashmap, 
-            //enviar a userspace para revisar alla si pertenece a un flujo que se inicio en el userspace por el ringbuf
-            //pero solo si ya se envio alguna vez un syn a userspace
-            //ademas senalizarlo
-            if (syndidntfitsentrb == true) {
-                new_flowm.syn_or_udp_to_rb = false;
-                if (submit_flow_record(flowhash, &new_flowm) == TC_ACT_OK) {
-                    return TC_ACT_OK;
-                }
-            }  
-            return TC_ACT_OK;          
-        }
+        } //else{          
+        //     //es un tcp no syn que no existe en el hashmap, // ESTOS CASOS se contemplaran a futuro por eso esta comentado el codigo
+        //     //enviar a userspace para revisar alla si pertenece a un flujo que se inicio en el userspace por el ringbuf
+        //     //pero solo si ya se envio alguna vez un syn a userspace
+        //     //ademas senalizarlo
+        //     if (syndidntfitsentrb == true) {
+        //         new_flowm.syn_or_udp_to_rb = false;
+        //         if (submit_flow_record(flowhash, &new_flowm) == TC_ACT_OK) {
+        //             return TC_ACT_OK;
+        //         }
+        //     }  
+        //     return TC_ACT_OK;          
+        // }
     }
-    //es aqui
+    //Comprobar si ya hay que generar estadisticas
     //if globalm->total_tcpudppackets % pkt_aggregation_value == 0, send this packet to userspace
     if (globalm->total_tcpudppackets % pkt_aggregation_value == 0) {
         struct flow_metrics *flowmetrics = bpf_map_lookup_elem(&flowstracker, &flowhash);
@@ -513,8 +521,8 @@ int connstatsin(struct __sk_buff* skb) {
         return TC_ACT_OK;
     }
 
-    // Después de procesar las cabeceras IP y TCP/UDP
-    pkt.payload_size = skb->len - offset;
+    // Después de procesar las cabeceras IP y TCP/UDP Calcular el payload
+    //pkt.payload_size = skb->len - offset;
 
     if (update_metrics(&pkt, globalm) == TC_ACT_OK) {
         //bpf_trace_printk("Ingress: update_metrics returned TC_ACT_OK\n", sizeof("Ingress: update_metrics returned TC_ACT_OK\n"));
